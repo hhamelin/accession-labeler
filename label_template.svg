@@ -1,0 +1,24 @@
+<svg width="127" height="76" viewBox="0 0 127 76" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background pattern (1px wide x 76px high tile) -->
+    <pattern id="bg-pattern" width="1" height="76" patternUnits="userSpaceOnUse">
+      <!-- Top diminishing lines -->
+      <rect y="4" width="1" height="3" fill="black"/>
+      <rect y="8" width="1" height="2" fill="black"/>
+      <rect y="11" width="1" height="1" fill="black"/>
+      <!-- Bottom diminishing lines -->
+      <rect y="64" width="1" height="1" fill="black"/>
+      <rect y="66" width="1" height="2" fill="black"/>
+      <rect y="69" width="1" height="3" fill="black"/>
+    </pattern>
+  </defs>
+
+  <!-- Background region bounded between left and right margins -->
+  <rect id="bg-region" x="10" y="0" width="107" height="76" fill="url(#bg-pattern)"/>
+
+  <!-- Centered Year text (Upper: Droid Sans Mono 36px, baseline y=40) -->
+  <text id="text-year" x="64" y="40" text-anchor="middle" font-family="Droid Sans Mono, monospace" font-size="36" fill="black">2026</text>
+
+  <!-- Centered Identifier text (Lower: Droid Sans 24px, baseline y=62) -->
+  <text id="text-identifier" x="64" y="62" text-anchor="middle" font-family="Droid Sans, sans-serif" font-size="24" fill="black">01.01A1</text>
+</svg>
