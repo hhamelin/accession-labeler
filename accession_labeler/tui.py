@@ -6,13 +6,15 @@ Provides interactive wizard, manual entry, tree/flat queue visualization, and ch
 import curses
 import os
 import re
+import textwrap
 from accession_labeler.parser import (
     parse_identifiers,
     parse_range_expression,
     expand_part_designation,
 )
-from accession_labeler.printer import process_label_batch
-from accession_labeler.renderer import load_template_text_baselines, get_fonts
+from accession_labeler.printer import process_label_batch, print_pdf_to_system_printer
+from accession_labeler.renderer import load_template_text_baselines, get_fonts, LABELS_DIR
+from accession_labeler.hub_renderer import generate_hub_pdf
 
 
 def build_tree_lines(queue):
@@ -85,6 +87,7 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
         font_year, font_id = get_fonts()
 
     def safe_addstr(win, y, x, text, attr=0):
+
         h, w = win.getmaxyx()
         if 0 <= y < h and 0 <= x < w:
             max_chars = w - x - 1
@@ -94,19 +97,52 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
                 except curses.error:
                     pass
 
+    def draw_header(win):
+        max_h, max_w = win.getmaxyx()
+        dry_run_flag = getattr(args, "dry_run", False)
+        printer_cmd_str = getattr(args, "printer_cmd", "ptouch print --image {file}")
+        mode_str = "[DRY RUN]" if dry_run_flag else "[LIVE PRINT]"
+        header = f" ACCESSION LABELER TUI  |  Printer: {printer_cmd_str}  |  Mode: {mode_str} "
+        safe_addstr(win, 0, 0, header.ljust(max_w), curses.color_pair(1) if curses.has_colors() else curses.A_REVERSE)
+
     def draw_dialog(stdscr, title, prompt, default_val="", hint=""):
         curses.curs_set(1)
+        stdscr.erase()
+        draw_header(stdscr)
+        stdscr.refresh()
         max_y, max_x = stdscr.getmaxyx()
 
-        prompt_lines = [p.strip() for p in prompt.split("\n") if p.strip()]
-        box_w = min(74, max_x - 4)
-        box_h = len(prompt_lines) + (1 if hint else 0) + 5
-        box_y = max(0, (max_y - box_h) // 2)
+        max_line_w = max(40, max_x - 10)
+
+        wrapped_prompt_lines = []
+        for line in prompt.split("\n"):
+            line_s = line.strip()
+            if line_s:
+                wrapped_prompt_lines.extend(textwrap.wrap(line_s, width=max_line_w))
+            else:
+                wrapped_prompt_lines.append("")
+
+        wrapped_hint_lines = textwrap.wrap(hint.strip(), width=max_line_w) if hint.strip() else []
+
+        all_lines = wrapped_prompt_lines + wrapped_hint_lines + [title + "   ", "[Enter] Accept   [Esc] Back   "]
+        longest_line = max((len(l) for l in all_lines), default=40)
+
+        box_w = min(max_x - 4, max(56, longest_line + 6))
+        box_h = len(wrapped_prompt_lines) + len(wrapped_hint_lines) + 5
+        box_y = max(1, (max_y - box_h) // 2)
         box_x = max(0, (max_x - box_w) // 2)
 
         win = curses.newwin(box_h, box_w, box_y, box_x)
         win.keypad(True)
         buffer = list(default_val)
+
+        def cleanup():
+            curses.curs_set(0)
+            win.erase()
+            win.refresh()
+            stdscr.erase()
+            draw_header(stdscr)
+            stdscr.refresh()
 
         while True:
             win.erase()
@@ -114,13 +150,14 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
             safe_addstr(win, 1, 2, f" {title} ", curses.A_BOLD)
 
             row = 2
-            for line in prompt_lines:
+            for line in wrapped_prompt_lines:
                 safe_addstr(win, row, 2, line)
                 row += 1
 
-            if hint:
-                safe_addstr(win, row, 2, hint, curses.color_pair(5) if curses.has_colors() else curses.A_DIM)
-                row += 1
+            if wrapped_hint_lines:
+                for hline in wrapped_hint_lines:
+                    safe_addstr(win, row, 2, hline, curses.color_pair(5) if curses.has_colors() else curses.A_DIM)
+                    row += 1
 
             input_str = "".join(buffer)
             disp_str = input_str[-(box_w - 6):] if len(input_str) > (box_w - 6) else input_str
@@ -128,13 +165,13 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
             row += 1
             safe_addstr(win, row, 2, "[Enter] Accept   [Esc] Back", curses.A_DIM)
 
-            win.refresh()
             ch = win.getch()
-            if ch in (10, 13, curses.KEY_ENTER):
-                curses.curs_set(0)
+            pad_enter = getattr(curses, 'KEY_PADENTER', 459)
+            if ch in (10, 13, curses.KEY_ENTER, pad_enter):
+                cleanup()
                 return "".join(buffer).strip()
             elif ch == 27:  # ESC
-                curses.curs_set(0)
+                cleanup()
                 return None
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
                 if buffer:
@@ -142,16 +179,28 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
             elif 32 <= ch <= 126:
                 buffer.append(chr(ch))
 
+
     def draw_confirm(stdscr, title, prompt):
         curses.curs_set(0)
+        stdscr.erase()
+        draw_header(stdscr)
+        stdscr.refresh()
         max_y, max_x = stdscr.getmaxyx()
         box_w = min(64, max_x - 4)
         box_h = 6
-        box_y = max(0, (max_y - box_h) // 2)
+        box_y = max(1, (max_y - box_h) // 2)
         box_x = max(0, (max_x - box_w) // 2)
 
         win = curses.newwin(box_h, box_w, box_y, box_x)
         win.keypad(True)
+
+        def cleanup():
+            win.erase()
+            win.refresh()
+            stdscr.erase()
+            draw_header(stdscr)
+            stdscr.refresh()
+
 
         while True:
             win.erase()
@@ -161,10 +210,14 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
             safe_addstr(win, 4, 2, "[Y] Yes   [N/Esc] No", curses.A_BOLD)
             win.refresh()
             ch = win.getch()
-            if ch in (ord('y'), ord('Y'), 10, 13):
+            pad_enter = getattr(curses, 'KEY_PADENTER', 459)
+            if ch in (ord('y'), ord('Y'), 10, 13, curses.KEY_ENTER, pad_enter):
+                cleanup()
                 return True
             elif ch in (ord('n'), ord('N'), 27):
+                cleanup()
                 return False
+
 
     def run_wizard(stdscr, last_year="2026"):
         current_year = last_year
@@ -178,7 +231,7 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
                 "Wizard 1/4: Year(s)",
                 "Enter Year(s) (e.g. 2024 or 2024-2026):",
                 default_val=current_year,
-                hint="Press [Esc] to return."
+                hint="Press [Enter] to Accept or [Esc] to Return."
             )
             if years_str is None:
                 return all_generated_tuples, current_year
@@ -196,7 +249,7 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
                         "Wizard 2/4: Batch(es)",
                         f"Year: {y}\nEnter Batch number(s) (e.g. 12 or 12-14):",
                         default_val="12",
-                        hint="Press [Esc] to return."
+                        hint="Press [Enter] to Accept or [Esc] to Return."
                     )
                     if batches_str is None:
                         break
@@ -214,7 +267,7 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
                                 "Wizard 3/4: Item(s)",
                                 f"Year: {y} | Batch: {b}\nEnter Item(s) for Batch {b} (e.g. 5 or 5-10):",
                                 default_val="5",
-                                hint="Press [Esc] to return."
+                                hint="Press [Enter] to Accept or [Esc] to Return."
                             )
                             if items_str is None:
                                 break
@@ -223,42 +276,72 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
                             if not items:
                                 continue
 
-                            # Step 4: Part(s) for EACH Item in items
-                            cancelled_item = False
-                            for idx, item_num in enumerate(items):
-                                while True:
-                                    item_count_info = f" ({idx + 1}/{len(items)})" if len(items) > 1 else ""
-                                    parts_str = draw_dialog(
+                            # Step 4: Part(s) for the selected Item(s)
+                            if len(items) > 1:
+                                items_summary = f"{items[0]}..{items[-1]}"
+                                hint_msg = "Press [Enter] to Accept or [Esc] to Return."
+                                prompt_msg = (
+                                    f"Year: {y} | Batch: {b} | Item(s): {items_summary}\n"
+                                    f"Enter Part(s) (e.g. A1-3, B1, * or blank for Whole Item).\n"
+                                    f"Type '%' to set unique parts per item."
+                                )
+                            else:
+                                items_summary = items[0]
+                                hint_msg = "Press [Enter] to Accept or [Esc] to Return."
+                                prompt_msg = (
+                                    f"Year: {y} | Batch: {b} | Item: {items_summary}\n"
+                                    f"Enter Part(s) (e.g. A1-3, B1, * or blank for Whole Item)."
+                                )
+
+
+
+                            parts_str = draw_dialog(
+                                stdscr,
+                                f"Wizard 4/4: Part(s) for Item(s) {items_summary}",
+                                prompt_msg,
+                                default_val=last_parts,
+                                hint=hint_msg
+                            )
+                            if parts_str is None:
+                                continue
+
+                            if len(items) > 1 and parts_str.strip().lower() in ("%", "each", "i", "item", "unique"):
+
+                                cancelled_item = False
+                                for idx, item_num in enumerate(items):
+                                    parts_str_single = draw_dialog(
                                         stdscr,
-                                        f"Wizard 4/4: Part(s) for Item {item_num}{item_count_info}",
-                                        f"Year: {y} | Batch: {b} | Item: {item_num}\nEnter Part(s) (e.g. A1-3, B1 or *, A1-3; or leave blank for Whole Item):",
+                                        f"Wizard 4/4: Part(s) for Item {item_num} ({idx + 1}/{len(items)})",
+                                        f"Year: {y} | Batch: {b} | Item: {item_num}\nEnter Part(s) (e.g. A1-3, B1, * or blank for Whole Item).",
                                         default_val=last_parts,
-                                        hint="Press [Esc] to return."
+                                        hint="Press [Enter] for next item or [Esc] to Cancel."
                                     )
-                                    if parts_str is None:
+                                    if parts_str_single is None:
                                         cancelled_item = True
                                         break
-
-                                    last_parts = parts_str
-                                    subparts = expand_part_designation(parts_str)
+                                    last_parts = parts_str_single
+                                    subparts = expand_part_designation(parts_str_single)
                                     for sp in subparts:
                                         all_generated_tuples.append((y, f"{b}.{item_num}{sp}"))
-                                    break
 
                                 if cancelled_item:
-                                    break
+                                    continue
+                            else:
+                                last_parts = parts_str
+                                subparts = expand_part_designation(parts_str)
+                                for item_num in items:
+                                    for sp in subparts:
+                                        all_generated_tuples.append((y, f"{b}.{item_num}{sp}"))
 
-                            if not cancelled_item:
-                                batch_completed = True
-                                break
-
-                            if cancelled_item:
-                                break
+                            batch_completed = True
+                            break
 
                     if batch_completed:
                         return all_generated_tuples, current_year
 
             return all_generated_tuples, current_year
+
+
 
     def tui_main(stdscr):
         try:
@@ -295,7 +378,7 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
 
             dry_status = "ON" if dry_run_flag else "OFF"
             safe_addstr(stdscr, 1, 1, "[A] Add Branch (Wizard)  [M] Manual Entry  [V] Toggle View  [C] Clear Queue", curses.A_BOLD)
-            safe_addstr(stdscr, 2, 1, f"[P] Print Chain Job     [T] Dry Run: {dry_status:<3}  [X/Del] Delete Selected  [Q] Quit", curses.A_BOLD)
+            safe_addstr(stdscr, 2, 1, f"[P] Print Tape Job   [D] Print Disc Hub   [N] Dry Run: {dry_status:<3}   [X/Del] Delete   [Q] Quit", curses.A_BOLD)
             safe_addstr(stdscr, 3, 0, "─" * max_x, curses.A_DIM)
 
             view_title = f" STAGED LABELS ({view_mode.upper()} VIEW - {len(queue)} items queued) "
@@ -367,9 +450,10 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
             elif ch in (ord('v'), ord('V'), 9):
                 view_mode = "flat" if view_mode == "tree" else "tree"
                 status_msg = f"Switched to {view_mode.upper()} view"
-            elif ch in (ord('t'), ord('T')):
+            elif ch in (ord('n'), ord('N')):
                 args.dry_run = not getattr(args, "dry_run", False)
                 status_msg = f"Dry Run mode set to {args.dry_run}"
+
             elif ch in (ord('c'), ord('C')):
                 if queue and draw_confirm(stdscr, "Clear Queue", f"Clear all {len(queue)} queued labels?"):
                     queue.clear()
@@ -424,6 +508,49 @@ def run_tui_mode(args, year_y=None, id_y=None, font_year=None, font_id=None):
                     stdscr.keypad(True)
                     curses.use_default_colors()
                     status_msg = "Print job finished."
+            elif ch in (ord('d'), ord('D')):
+                if not queue:
+                    status_msg = "Queue is empty! Add labels first."
+                else:
+                    start_pos_str = draw_dialog(
+                        stdscr,
+                        "Disc Hub Printing",
+                        "Enter starting position on Compulabel sheet (1-26):",
+                        default_val="1",
+                        hint="Position 1 is top-left label. Position 26 is bottom-right."
+                    )
+                    if start_pos_str is not None:
+                        try:
+                            start_pos_val = int(start_pos_str)
+                        except ValueError:
+                            start_pos_val = 1
+                        
+                        send_lpr = draw_confirm(
+                            stdscr,
+                            "System Printer",
+                            "Send generated PDF directly to system printer (lpr/lp)?"
+                        )
+                        
+                        show_guides = draw_confirm(
+                            stdscr,
+                            "Alignment Guides",
+                            "Draw light guide circles on PDF (for alignment testing on plain paper)?"
+                        )
+
+                        LABELS_DIR.mkdir(parents=True, exist_ok=True)
+                        pdf_out = (LABELS_DIR / "disc_hubs.pdf").resolve()
+                        pdf_path = generate_hub_pdf(queue, str(pdf_out), start_pos=start_pos_val, draw_guides=show_guides)
+                        
+                        if send_lpr:
+                            dry_run_val = getattr(args, "dry_run", False)
+                            ok, msg = print_pdf_to_system_printer(pdf_path, dry_run=dry_run_val, verbose=False)
+                            if ok:
+                                status_msg = f"Disc Hub PDF generated & sent to printer ({len(queue)} items, pos {start_pos_val}): {pdf_path}"
+                            else:
+                                status_msg = f"Disc Hub PDF saved ({pdf_path}), but print error: {msg}"
+
+                        else:
+                            status_msg = f"Disc Hub PDF saved successfully ({len(queue)} items, pos {start_pos_val}): {pdf_path}"
 
     try:
         curses.wrapper(tui_main)

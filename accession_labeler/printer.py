@@ -243,3 +243,82 @@ def process_label_batch(
         if not success:
             return False
     return True
+
+
+def get_system_printers():
+    """
+    Returns list of available CUPS printer queue names using lpstat.
+    """
+    try:
+        res = subprocess.run(["lpstat", "-e"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0:
+            printers = [p.strip() for p in res.stdout.splitlines() if p.strip()]
+            if printers:
+                return printers
+        res_p = subprocess.run(["lpstat", "-p"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res_p.returncode == 0:
+            printers = []
+            for line in res_p.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "printer":
+                    printers.append(parts[1])
+            if printers:
+                return printers
+    except Exception:
+        pass
+    return []
+
+
+def print_pdf_to_system_printer(pdf_filepath, printer_name=None, dry_run=False, verbose=True):
+    """
+    Sends generated PDF sheet to standard system printer using CUPS 'lpr' or 'lp'.
+    Auto-detects available CUPS system printers if no default is configured.
+    Returns (success: bool, message: str).
+    """
+    pdf_path = Path(pdf_filepath).resolve()
+    if not pdf_path.exists():
+        return False, f"PDF file not found: {pdf_path}"
+
+    available = get_system_printers()
+    if not printer_name and available:
+        printer_name = available[0]
+
+    cmd = ["lpr", "-o", "fit-to-page=false", "-o", "natural-scaling=100"]
+    if printer_name:
+        cmd.extend(["-P", printer_name])
+    cmd.append(str(pdf_path))
+
+    cmd_str = " ".join(cmd)
+    if verbose:
+        print(f"  [PDF Print Command]: {cmd_str}")
+
+    if dry_run:
+        if verbose:
+            print("  [Dry Run]: Command not executed.")
+        return True, f"Dry run complete ({cmd_str})"
+
+
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0:
+            dest_info = f" to printer '{printer_name}'" if printer_name else ""
+            return True, f"Job sent{dest_info}"
+
+        cmd_lp = ["lp", "-o", "fit-to-page=false", "-o", "natural-scaling=100"]
+        if printer_name:
+            cmd_lp.extend(["-d", printer_name])
+        cmd_lp.append(str(pdf_path))
+        res_lp = subprocess.run(cmd_lp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res_lp.returncode == 0:
+            dest_info = f" to printer '{printer_name}'" if printer_name else ""
+            return True, f"Job sent{dest_info} via lp"
+
+
+        err_msg = res.stderr.strip() or res_lp.stderr.strip() or "Print command failed"
+        if "No default destination" in err_msg and not available:
+            return False, "No default printer set in CUPS. PDF saved to labels/disc_hubs.pdf for manual printing."
+        return False, err_msg
+    except Exception as e:
+        return False, str(e)
+
+

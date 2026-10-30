@@ -4,4 +4,5 @@ __pycache__/
 *.pyd
 .pytest_cache/
 labels/*.png
+labels/*.pdf
 !labels/.gitkeep

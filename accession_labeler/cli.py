@@ -40,6 +40,15 @@ def main():
     parser.add_argument("--no-chain", action="store_true", help="Disable chain printing for ranges (print each label with separate cuts)")
     parser.add_argument("--printer-cmd", default="ptouch print --image {file}", help="Custom printer command template (default: 'ptouch print --image {file}')")
 
+    # Disc Hub sheet flags
+    parser.add_argument("--disc-hub", action="store_true", help="Render Compulabel #312862 Disc Hub Label PDF sheet")
+    parser.add_argument("--start-pos", type=int, default=1, help="Starting position on label sheet (1-26, default: 1)")
+    parser.add_argument("--hub-pdf", default="labels/disc_hubs.pdf", help="Output PDF file path for disc hub sheet (default: labels/disc_hubs.pdf)")
+    parser.add_argument("--show-guides", action="store_true", help="Draw alignment guide circles on PDF (for testing on plain paper)")
+    parser.add_argument("--print-pdf", action="store_true", help="Send generated PDF directly to system printer (lpr/lp)")
+    parser.add_argument("--offset-x", type=float, default=0.0, help="Calibration X shift in inches (+ right, - left)")
+    parser.add_argument("--offset-y", type=float, default=0.0, help="Calibration Y shift in inches (+ up, - down)")
+
     args = parser.parse_args()
     year_y, id_y = load_template_text_baselines()
     font_year, font_id = get_fonts()
@@ -67,8 +76,37 @@ def main():
         parser.print_help(sys.stderr)
         sys.exit(1)
 
-    process_label_batch(labels_to_generate, args, year_y, id_y, font_year, font_id)
+    if args.disc_hub:
+        from accession_labeler.hub_config import Compulabel312862Config
+        from accession_labeler.hub_renderer import generate_hub_pdf
+        from accession_labeler.printer import print_pdf_to_system_printer
+
+        config = Compulabel312862Config()
+        if args.offset_x != 0.0 or args.offset_y != 0.0:
+            config.disc_spec.offset_x_in = args.offset_x
+            config.disc_spec.offset_y_in = args.offset_y
+
+        print(f"\nProcessing Disc Hub Sheet for {len(labels_to_generate)} label(s)...")
+        pdf_path = generate_hub_pdf(
+            labels_to_generate,
+            args.hub_pdf,
+            start_pos=args.start_pos,
+            draw_guides=args.show_guides,
+            config=config
+        )
+
+        print(f"  Disc Hub PDF Saved: {pdf_path}")
+
+        if args.print_pdf:
+            ok, msg = print_pdf_to_system_printer(pdf_path, dry_run=args.dry_run)
+            if ok:
+                print("  Disc Hub PDF sent to system printer.")
+            else:
+                print(f"  Print error: {msg}", file=sys.stderr)
+    else:
+        process_label_batch(labels_to_generate, args, year_y, id_y, font_year, font_id)
 
 
 if __name__ == "__main__":
     main()
+
